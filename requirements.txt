@@ -1,0 +1,8 @@
+gradio 
+pandas 
+numpy 
+langchain-community 
+langchain-huggingface 
+langchain-chroma 
+sentence-transformers 
+chromadb
