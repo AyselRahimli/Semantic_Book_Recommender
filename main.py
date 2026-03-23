@@ -1,7 +1,7 @@
+import os
 import gradio as gr
 import pandas as pd
 import numpy as np
-import os
 
 from langchain_community.document_loaders import TextLoader
 from langchain_text_splitters import CharacterTextSplitter
@@ -11,11 +11,11 @@ from langchain_chroma import Chroma
 
 books = pd.read_csv("books_sentimental.csv")
 
-books["large_thumbnail"] = books["thumbnail"] + "&fife=w800"
+books["thumbnail"] = books["thumbnail"].fillna("")
 books["large_thumbnail"] = np.where(
-    books["thumbnail"].isna(),
-    "cover-not-found.jpg",
-    books["large_thumbnail"],
+    books["thumbnail"].str.strip() == "",
+    "not_found.jpg",
+    books["thumbnail"] + "&fife=w800"
 )
 
 raw_documents = TextLoader("tagged_description.txt", encoding="utf-8").load()
@@ -49,66 +49,87 @@ else:
 
 def retrieve_semantic_recommendations(
     query: str,
-    category: str = None,
-    tone: str = None,
+    category: str = "All",
+    tone: str = "All",
     initial_top_k: int = 50,
     final_top_k: int = 16,
 ) -> pd.DataFrame:
-
     recs = db_books.similarity_search(query, k=initial_top_k)
-    books_list = [int(rec.page_content.strip('"').split()[0]) for rec in recs]
-    book_recs = books[books["isbn13"].isin(books_list)].head(initial_top_k).copy()
+
+    books_list = []
+    for rec in recs:
+        parts = rec.page_content.strip('"').split()
+        if len(parts) > 0 and parts[0].isdigit():
+            books_list.append(int(parts[0]))
+
+    book_recs = books[books["isbn13"].isin(books_list)].copy()
 
     if category != "All":
-        book_recs = book_recs[book_recs["simple_categories"] == category].head(final_top_k)
-    else:
-        book_recs = book_recs.head(final_top_k)
+        book_recs = book_recs[book_recs["simple_categories"] == category].copy()
 
-    if tone == "Happy":
-        book_recs = book_recs.sort_values(by="joy", ascending=False)
-    elif tone == "Surprising":
-        book_recs = book_recs.sort_values(by="surprise", ascending=False)
-    elif tone == "Angry":
-        book_recs = book_recs.sort_values(by="anger", ascending=False)
-    elif tone == "Suspenseful":
-        book_recs = book_recs.sort_values(by="fear", ascending=False)
-    elif tone == "Sad":
-        book_recs = book_recs.sort_values(by="sadness", ascending=False)
+    tone_map = {
+        "Happy": "joy",
+        "Surprising": "surprise",
+        "Angry": "anger",
+        "Suspenseful": "fear",
+        "Sad": "sadness"
+    }
+
+    if tone != "All":
+        tone_col = tone_map.get(tone)
+        if tone_col in book_recs.columns:
+            book_recs = book_recs.sort_values(by=tone_col, ascending=False)
+        else:
+            print(f"Column '{tone_col}' not found. Available columns: {book_recs.columns.tolist()}")
 
     return book_recs.head(final_top_k)
 
 
-def recommend_books(query, category, tone):
+def format_authors(authors: str) -> str:
+    authors = str(authors)
+    authors_split = authors.split(";")
+
+    if len(authors_split) == 2:
+        return f"{authors_split[0]} and {authors_split[1]}"
+    elif len(authors_split) > 2:
+        return f"{', '.join(authors_split[:-1])}, and {authors_split[-1]}"
+    else:
+        return authors
+
+
+def recommend_books(query: str, category: str, tone: str):
     try:
         recommendations = retrieve_semantic_recommendations(query, category, tone)
+
+        if recommendations.empty:
+            return "### No recommendations found 😔", []
+
         results = []
 
         for _, row in recommendations.iterrows():
             description = str(row["description"])
             truncated_description = " ".join(description.split()[:30]) + "..."
 
-            authors = str(row["authors"])
-            authors_split = authors.split(";")
+            authors_str = format_authors(row["authors"])
 
-            if len(authors_split) == 2:
-                authors_str = f"{authors_split[0]} and {authors_split[1]}"
-            elif len(authors_split) > 2:
-                authors_str = f"{', '.join(authors_split[:-1])}, and {authors_split[-1]}"
-            else:
-                authors_str = authors
+            image = row.get("large_thumbnail", "not_found.jpg")
+            if pd.isna(image) or str(image).strip() == "":
+                image = "not_found.jpg"
 
             caption = f"{row['title']} by {authors_str}: {truncated_description}"
-            results.append((row["large_thumbnail"], caption))
+            results.append((image, caption))
 
-        return results
+        return "", results
 
     except Exception as e:
-        return [(None, f"ERROR: {str(e)}")]
+        print("ERROR:", e)
+        return f"### Error: {str(e)}", []
+
 
 categories = ["All"] + sorted(books["simple_categories"].dropna().unique().tolist())
 tones = ["All", "Happy", "Surprising", "Angry", "Suspenseful", "Sad"]
 
-with gr.Blocks(theme=gr.themes.Glass()) as dashboard:
+with gr.Blocks() as dashboard:
     gr.Markdown("# Semantic book recommender")
 
     with gr.Row():
@@ -129,12 +150,13 @@ with gr.Blocks(theme=gr.themes.Glass()) as dashboard:
         submit_button = gr.Button("Find recommendations")
 
     gr.Markdown("## Recommendations")
-    output = gr.Gallery(label="Recommended books", columns=8, rows=2)
+    output_message = gr.Markdown()
+    output_gallery = gr.Gallery(label="Recommended books", columns=8, rows=2)
 
     submit_button.click(
         fn=recommend_books,
         inputs=[user_query, category_dropdown, tone_dropdown],
-        outputs=output
+        outputs=[output_message, output_gallery]
     )
 
 if __name__ == "__main__":
